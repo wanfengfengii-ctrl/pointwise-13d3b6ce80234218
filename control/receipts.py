@@ -42,9 +42,22 @@ class ReceiptStore:
                 segment INTEGER NOT NULL,
                 revision TEXT NOT NULL,
                 lines TEXT NOT NULL,
+                lit_ms INTEGER,
+                origin TEXT NOT NULL DEFAULT 'manual',
                 PRIMARY KEY (show, screen, cue, segment)
             );
         ''')
+        self._migrate_segment_receipts()
+
+    def _migrate_segment_receipts(self) -> None:
+        with self.database.transaction(write=True) as connection:
+            columns = {row['name'] for row in connection.execute('PRAGMA table_info(segment_receipts)')}
+            if 'lit_ms' not in columns:
+                connection.execute('ALTER TABLE segment_receipts ADD COLUMN lit_ms INTEGER')
+            if 'origin' not in columns:
+                connection.execute(
+                    "ALTER TABLE segment_receipts ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+                )
 
     @staticmethod
     def _find(connection, show: str, request: str) -> CorrectionReceipt | None:
@@ -111,7 +124,10 @@ class ReceiptStore:
     def record_display_result(self, event: LitEvent) -> None:
         with self.database.transaction(write=True) as connection:
             connection.execute('''
-                INSERT INTO segment_receipts VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO segment_receipts
+                    (show, screen, sequence, cue, segment, revision, lines, lit_ms, origin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(show, screen, cue, segment) DO NOTHING
             ''', (event.show, event.screen, event.sequence, event.cue, event.segment,
-                  event.revision, json.dumps(event.lines, ensure_ascii=False)))
+                  event.revision, json.dumps(event.lines, ensure_ascii=False),
+                  event.lit_ms, event.origin))

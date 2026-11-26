@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+from time import time_ns
 
 from display.local_state import ScreenStateStore
 from display.outcomes import LitEvent
 from display.preload import PreloadBuffer
 from editions.revisions import FrozenEdition
-from errors import conflict
+from errors import BusinessError, conflict
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,19 @@ class DisplayCommand:
     segment: int
     revision: str | None = None
     epoch: int | None = None
+    origin: str = 'manual'
+    auto_delay_ms: int | None = None
+
+
+class AutoTailNotDue(BusinessError):
+    """An automatic tail poll reached the screen before its deadline."""
+
+    def __init__(self) -> None:
+        super().__init__(409, 'auto_tail_not_due', 'automatic tail continuation is not due yet')
+
+
+def wall_clock_ms() -> int:
+    return time_ns() // 1_000_000
 
 
 def _next_segment(edition: FrozenEdition, last) -> tuple[str, int] | None:
@@ -32,9 +46,11 @@ def _next_segment(edition: FrozenEdition, last) -> tuple[str, int] | None:
 
 
 class Playback:
-    def __init__(self, state: ScreenStateStore, preloads: PreloadBuffer):
+    def __init__(self, state: ScreenStateStore, preloads: PreloadBuffer,
+                 clock_ms=None):
         self.state = state
         self.preloads = preloads
+        self.clock_ms = clock_ms or wall_clock_ms
 
     def light(self, command: DisplayCommand) -> LitEvent:
         show, screen = command.show, command.screen
@@ -50,6 +66,14 @@ class Playback:
             initial = self.state.edition(connection, session['initial_revision'])
             if _next_segment(initial, last) != (cue, segment):
                 raise conflict('requested segment is out of playback order')
+            if command.origin == 'auto' and self.state.auto_cancel_exists(
+                    connection, show, screen, cue):
+                raise conflict('automatic tail continuation has been cancelled')
+            now_ms = int(self.clock_ms())
+            if (command.origin == 'auto' and command.auto_delay_ms is not None
+                    and last is not None and last['lit_ms'] is not None
+                    and now_ms < last['lit_ms'] + command.auto_delay_ms):
+                raise AutoTailNotDue()
             if segment == 1:
                 revision = session['active_revision']
                 if (command.revision, command.epoch) != (revision, session['epoch']):
@@ -60,7 +84,11 @@ class Playback:
             candidate = self.preloads.get(show, screen, cue, segment, revision)
             segment_data = candidate if candidate is not None else edition.get_segment(cue, segment)
             sequence = 1 if last is None else last['sequence'] + 1
-            self.state.insert_event(connection, show, screen, sequence, cue, segment, revision, segment_data.lines)
-            event = LitEvent(show, screen, sequence, cue, segment, revision, segment_data.lines)
+            lit_ms = now_ms
+            origin = 'auto' if command.origin == 'auto' else 'manual'
+            self.state.insert_event(connection, show, screen, sequence, cue, segment,
+                                    revision, segment_data.lines, lit_ms, origin)
+            event = LitEvent(show, screen, sequence, cue, segment, revision,
+                             segment_data.lines, lit_ms, origin)
         self.preloads.discard(show, screen, cue, segment)
         return event

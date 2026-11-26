@@ -38,7 +38,8 @@ def _screen_fact(runtime: Runtime, identity: tuple) -> LitEvent | None:
     return None
 
 
-def advance(runtime: Runtime, show_id: str, screen: str, cue: str, segment: int) -> AdvanceResult:
+def advance(runtime: Runtime, show_id: str, screen: str, cue: str, segment: int,
+            origin: str = 'manual', auto_delay_ms: int | None = None) -> AdvanceResult:
     positive(segment, 'segment')
     show = runtime.live_show(show_id, screen)
     runtime.editions.get(show.initial_revision).get_segment(cue, segment)
@@ -52,9 +53,10 @@ def advance(runtime: Runtime, show_id: str, screen: str, cue: str, segment: int)
         if not opening_is_ready(runtime, show_id):
             return waiting
         revision, epoch = runtime.receipts.opening_revision(show_id, show.initial_revision)
-        command = DisplayCommand(*identity, revision, epoch)
+        command = DisplayCommand(*identity, revision, epoch, origin=origin,
+                                 auto_delay_ms=auto_delay_ms)
     else:
-        command = DisplayCommand(*identity)
+        command = DisplayCommand(*identity, origin=origin, auto_delay_ms=auto_delay_ms)
     runtime.screen.send_segment(command)
     event = _screen_fact(runtime, identity)
     return waiting if event is None else _result(runtime, event)

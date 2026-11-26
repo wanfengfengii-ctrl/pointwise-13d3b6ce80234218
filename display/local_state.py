@@ -31,6 +31,8 @@ class ScreenStateStore:
                 segment INTEGER NOT NULL,
                 revision TEXT NOT NULL REFERENCES screen_editions(revision),
                 lines TEXT NOT NULL,
+                lit_ms INTEGER,
+                origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'auto')),
                 PRIMARY KEY (show, screen, sequence),
                 UNIQUE (show, screen, cue, segment),
                 FOREIGN KEY (show, screen) REFERENCES sessions(show, screen)
@@ -46,7 +48,27 @@ class ScreenStateStore:
                 UNIQUE (show, screen, epoch),
                 FOREIGN KEY (show, screen) REFERENCES sessions(show, screen)
             );
+            CREATE TABLE IF NOT EXISTS auto_cancellations (
+                show TEXT NOT NULL,
+                screen TEXT NOT NULL,
+                cue TEXT NOT NULL,
+                request TEXT NOT NULL,
+                cancelled_ms INTEGER,
+                PRIMARY KEY (show, screen, request),
+                FOREIGN KEY (show, screen) REFERENCES sessions(show, screen)
+            );
         ''')
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self.database.transaction(write=True) as connection:
+            columns = {row['name'] for row in connection.execute('PRAGMA table_info(lit_events)')}
+            if 'lit_ms' not in columns:
+                connection.execute('ALTER TABLE lit_events ADD COLUMN lit_ms INTEGER')
+            if 'origin' not in columns:
+                connection.execute(
+                    "ALTER TABLE lit_events ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+                )
 
     def transaction(self, *, write: bool = True):
         return self.database.transaction(write=write)
@@ -114,9 +136,15 @@ class ScreenStateStore:
 
     @staticmethod
     def insert_event(connection, show: str, screen: str, sequence: int, cue: str,
-                     segment: int, revision: str, lines: tuple[str, ...]) -> None:
-        connection.execute('INSERT INTO lit_events VALUES (?, ?, ?, ?, ?, ?, ?)', (
-            show, screen, sequence, cue, segment, revision, json.dumps(lines, ensure_ascii=False),
+                     segment: int, revision: str, lines: tuple[str, ...],
+                     lit_ms: int | None = None, origin: str = 'manual') -> None:
+        connection.execute('''
+            INSERT INTO lit_events
+                (show, screen, sequence, cue, segment, revision, lines, lit_ms, origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            show, screen, sequence, cue, segment, revision,
+            json.dumps(lines, ensure_ascii=False), lit_ms, origin,
         ))
 
     def read_segment(self, show: str, screen: str, cue: str, segment: int):
@@ -155,3 +183,38 @@ class ScreenStateStore:
         with self.transaction(write=False) as connection:
             row = self.cutover_row(connection, show, screen, request)
         return row if row is not None and row['applied'] else None
+
+    @staticmethod
+    def auto_cancel_row(connection, show: str, screen: str, request: str):
+        return connection.execute('''
+            SELECT * FROM auto_cancellations
+            WHERE show = ? AND screen = ? AND request = ?
+        ''', (show, screen, request)).fetchone()
+
+    @staticmethod
+    def insert_auto_cancel(connection, show: str, screen: str, cue: str,
+                           request: str, cancelled_ms: int | None = None) -> None:
+        connection.execute('''
+            INSERT INTO auto_cancellations (show, screen, cue, request, cancelled_ms)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (show, screen, cue, request, cancelled_ms))
+
+    @staticmethod
+    def auto_cancel_exists(connection, show: str, screen: str, cue: str) -> bool:
+        row = connection.execute('''
+            SELECT 1 FROM auto_cancellations
+            WHERE show = ? AND screen = ? AND cue = ? LIMIT 1
+        ''', (show, screen, cue)).fetchone()
+        return row is not None
+
+    def read_auto_cancel(self, show: str, screen: str, request: str):
+        with self.transaction(write=False) as connection:
+            return self.auto_cancel_row(connection, show, screen, request)
+
+    def read_effective_auto_cancel(self, show: str, screen: str, cue: str):
+        with self.transaction(write=False) as connection:
+            return connection.execute('''
+                SELECT * FROM auto_cancellations
+                WHERE show = ? AND screen = ? AND cue = ?
+                LIMIT 1
+            ''', (show, screen, cue)).fetchone()

@@ -16,17 +16,30 @@ class DisplayLedger:
                 segment INTEGER NOT NULL,
                 revision TEXT NOT NULL,
                 lines TEXT NOT NULL,
+                lit_ms INTEGER,
+                origin TEXT NOT NULL DEFAULT 'manual',
                 PRIMARY KEY (show, screen, sequence)
             );
         ''')
+        with database.transaction(write=True) as connection:
+            columns = {row['name'] for row in connection.execute('PRAGMA table_info(ledger)')}
+            if 'lit_ms' not in columns:
+                connection.execute('ALTER TABLE ledger ADD COLUMN lit_ms INTEGER')
+            if 'origin' not in columns:
+                connection.execute(
+                    "ALTER TABLE ledger ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+                )
 
     def accept(self, event: LitEvent) -> bool:
         with self.database.transaction(write=True) as connection:
             cursor = connection.execute('''
-                INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ledger
+                    (show, screen, sequence, cue, segment, revision, lines, lit_ms, origin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(show, screen, sequence) DO NOTHING
             ''', (event.show, event.screen, event.sequence, event.cue, event.segment,
-                  event.revision, json.dumps(event.lines, ensure_ascii=False)))
+                  event.revision, json.dumps(event.lines, ensure_ascii=False),
+                  event.lit_ms, event.origin))
             return cursor.rowcount == 1
 
     def list_for_screen(self, show: str, screen: str) -> list[LitEvent]:

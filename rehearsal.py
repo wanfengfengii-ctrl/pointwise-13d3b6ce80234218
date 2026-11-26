@@ -80,10 +80,22 @@ class RehearsalLink(LocalScreenLink):
         return self.delivery.read("segment-result", super().find_segment,
                                   show, screen, cue, segment)
 
+    def cancel_auto_tail(self, show, screen, cue, request):
+        return self.delivery.send(
+            "cancel", super().cancel_auto_tail, show, screen, cue, request)
+
+    def find_auto_cancel(self, show, screen, request):
+        return self.delivery.read(
+            "cancel-result", super().find_auto_cancel, show, screen, request)
+
+    def find_effective_auto_cancel(self, show, screen, cue):
+        return self.delivery.read(
+            "cancel-result", super().find_effective_auto_cancel, show, screen, cue)
+
 
 class FixtureCase(HTTPCase):
-    def start_server(self, link_factory=RehearsalLink):
-        super().start_server(link_factory)
+    def start_server(self, link_factory=RehearsalLink, clock_ms=None):
+        super().start_server(link_factory, clock_ms=clock_ms)
 
     def test_v1_delivery(self):
         revision = self.publish()["revision"]

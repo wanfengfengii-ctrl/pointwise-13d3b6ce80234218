@@ -29,6 +29,11 @@ class ControlledScreen(LocalScreenLink):
         self.hidden_segments = set()
         self.paused_cutovers = set()
         self.hidden_cutovers = set()
+        self.paused_auto_cancels = set()
+        self.hidden_auto_cancels = set()
+        # Compatibility aliases for equivalently named rehearsal fixtures.
+        self.paused_cancellations = self.paused_auto_cancels
+        self.hidden_cancellations = self.hidden_auto_cancels
 
     def send_segment(self, command):
         identity = (command.show, command.screen, command.cue, command.segment)
@@ -63,6 +68,33 @@ class ControlledScreen(LocalScreenLink):
             return None
         return super().find_cutover(show, screen, request)
 
+    @staticmethod
+    def _auto_cancel_keys(show, screen, cue, request):
+        return {
+            (show, screen, cue, request),
+            (show, screen, request),
+            (show, screen, cue),
+            request,
+        }
+
+    def cancel_auto_tail(self, show, screen, cue, request):
+        keys = self._auto_cancel_keys(show, screen, cue, request)
+        if keys & self.paused_auto_cancels:
+            return None
+        return super().cancel_auto_tail(show, screen, cue, request)
+
+    def find_auto_cancel(self, show, screen, request):
+        keys = {(show, screen, request), request}
+        if keys & self.hidden_auto_cancels:
+            return None
+        return super().find_auto_cancel(show, screen, request)
+
+    def find_effective_auto_cancel(self, show, screen, cue):
+        keys = {(show, screen, cue), cue}
+        if keys & self.hidden_auto_cancels:
+            return None
+        return super().find_effective_auto_cancel(show, screen, cue)
+
 
 class HTTPCase(unittest.TestCase):
     binding = {'show': 'S7', 'screen': 'P1'}
@@ -77,8 +109,11 @@ class HTTPCase(unittest.TestCase):
         self.addCleanup(self.stop_server)
         self.start_server()
 
-    def start_server(self, link_factory=ControlledScreen):
-        self.app = build_runtime(self.directory, link_factory=link_factory)
+    def start_server(self, link_factory=ControlledScreen, clock_ms=None):
+        if clock_ms is None:
+            clock_ms = getattr(self, 'clock_ms', None)
+        self.app = build_runtime(self.directory, link_factory=link_factory, clock_ms=clock_ms)
+        self.clock_ms = clock_ms
         self.screen = self.app.screen
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(self.app))
         self.thread = Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.02})

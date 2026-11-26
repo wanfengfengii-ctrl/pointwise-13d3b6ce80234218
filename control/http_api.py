@@ -4,15 +4,16 @@ import json
 from dataclasses import asdict
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Event, Thread
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 from audit.history import history
 from control.advance import advance
+from control.auto_tail import auto_tail_status, cancel_auto_tail, open_with_auto_tail, settle_closed
 from control.corrections import correct, correction_status
 from control.preview import preview
 from errors import BusinessError, invalid, missing, name
-from shows.binding import open_show
 from shows.closing import close_show
 
 if TYPE_CHECKING:
@@ -25,13 +26,37 @@ def _dispatch(runtime: Runtime, method: str, path: str, data: dict) -> tuple[int
     if (method, path) == ('POST', '/publish'):
         return 201, asdict(runtime.editions.publish(data.get('width'), data.get('cues')))
     if (method, path) == ('POST', '/open'):
-        show = open_show(runtime.shows, runtime.screens, runtime.editions,
-                         name(data.get('show'), 'show'), name(data.get('screen'), 'screen'),
-                         name(data.get('revision'), 'revision'))
+        show = open_with_auto_tail(
+            runtime,
+            name(data.get('show'), 'show'),
+            name(data.get('screen'), 'screen'),
+            name(data.get('revision'), 'revision'),
+            data.get('auto_tail'),
+            'auto_tail' in data,
+        )
         runtime.ensure_screen(show)
         return 200, asdict(show)
+    if (method, path) == ('POST', '/auto_tail/cancel'):
+        result = cancel_auto_tail(
+            runtime,
+            name(data.get('show'), 'show'),
+            name(data.get('screen'), 'screen'),
+            name(data.get('cue'), 'cue'),
+            name(data.get('request'), 'request'),
+        )
+        return (202 if result.status == 'pending' else 200), asdict(result)
+    if (method, path) == ('GET', '/auto_tail'):
+        result = auto_tail_status(
+            runtime,
+            name(data.get('show'), 'show'),
+            name(data.get('screen'), 'screen'),
+            name(data.get('cue'), 'cue'),
+        )
+        return 200, asdict(result)
     if (method, path) == ('POST', '/close'):
-        return 200, asdict(close_show(runtime.shows, name(data.get('show'), 'show'), runtime.stop_screen))
+        show = close_show(runtime.shows, name(data.get('show'), 'show'), runtime.stop_screen)
+        settle_closed(runtime, show.show)
+        return 200, asdict(show)
     if (method, path) == ('GET', '/correction_status'):
         result = correction_status(runtime, name(data.get('show'), 'show'), name(data.get('request'), 'request'))
         return (202 if result.status == 'pending' else 200), asdict(result)
@@ -108,8 +133,23 @@ def make_handler(runtime: Runtime) -> type[BaseHTTPRequestHandler]:
 
 
 def serve(runtime: Runtime, host: str, port: int) -> None:
-    with ThreadingHTTPServer((host, port), make_handler(runtime)) as server:
-        server.serve_forever()
+    stop_polling = Event()
+
+    def poll_loop() -> None:
+        while not stop_polling.wait(0.02):
+            try:
+                runtime.poll_auto_tail()
+            except Exception:
+                # The HTTP process stays available; the next poll retries
+                # durable state reconciliation.
+                pass
+
+    Thread(target=poll_loop, name='auto-tail-poller', daemon=True).start()
+    try:
+        with ThreadingHTTPServer((host, port), make_handler(runtime)) as server:
+            server.serve_forever()
+    finally:
+        stop_polling.set()
 
 
 def request_json(host: str, port: int, method: str, target: str,
